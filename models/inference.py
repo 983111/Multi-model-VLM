@@ -11,6 +11,7 @@ import torch
 from pathlib import Path
 from PIL import Image
 from transformers import AutoProcessor, AutoModelForVision2Seq
+from peft import PeftModel
 
 
 class VLMInference:
@@ -22,22 +23,44 @@ class VLMInference:
         device: str | None = None,
         max_new_tokens: int = 64,
     ):
-        self.checkpoint     = checkpoint or self.DEFAULT_MODEL
-        self.device         = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.checkpoint = checkpoint
+        self.base_model_id = self.DEFAULT_MODEL
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.max_new_tokens = max_new_tokens
         self._load()
 
     def _load(self):
-        print(f"[VLMInference] Loading '{self.checkpoint}' on {self.device} …")
+        adapter_checkpoint = None
+        model_id_for_processor = self.base_model_id
+
+        if self.checkpoint:
+            ckpt_path = Path(self.checkpoint)
+            if ckpt_path.exists() and (ckpt_path / "adapter_config.json").exists():
+                adapter_checkpoint = str(ckpt_path)
+                model_id_for_processor = self.base_model_id
+            else:
+                model_id_for_processor = self.checkpoint
+
+        print(f"[VLMInference] Loading base '{model_id_for_processor}' on {self.device} ...")
         self.processor = AutoProcessor.from_pretrained(
-            self.checkpoint, trust_remote_code=True
+            model_id_for_processor, trust_remote_code=True
         )
-        self.model = AutoModelForVision2Seq.from_pretrained(
-            self.checkpoint,
-            torch_dtype=torch.float32,   # fp32 on CPU
+
+        base_model = AutoModelForVision2Seq.from_pretrained(
+            model_id_for_processor,
+            torch_dtype=torch.float32,
             device_map=self.device,
             trust_remote_code=True,
         )
+
+        if adapter_checkpoint:
+            print(f"[VLMInference] Attaching LoRA adapter from '{adapter_checkpoint}' ...")
+            self.model = PeftModel.from_pretrained(base_model, adapter_checkpoint)
+            self.checkpoint = adapter_checkpoint
+        else:
+            self.model = base_model
+            self.checkpoint = model_id_for_processor
+
         self.model.eval()
         print("[VLMInference] Ready.")
 
@@ -56,7 +79,6 @@ class VLMInference:
             do_sample=False,
         )
 
-        # For GIT-style models the full sequence is returned; strip prompt length
         input_len = inputs.get("input_ids", torch.tensor([])).shape[-1]
         generated = output_ids[0][input_len:]
         text = self.processor.tokenizer.decode(generated, skip_special_tokens=True)

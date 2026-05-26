@@ -227,6 +227,7 @@ def main():
     save_path = ckpt_dir / "final"
     model.save_pretrained(save_path)
     processor.save_pretrained(save_path)
+    (save_path / "base_model_id.txt").write_text(model_id + "\n")
     print(f"\nCheckpoint saved → {save_path}")
     print("Next: python eval/run_eval.py --checkpoint models/checkpoints/final")
 

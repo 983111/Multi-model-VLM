@@ -9,6 +9,7 @@ import json
 import sys
 import base64
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
@@ -20,7 +21,22 @@ from PIL import Image
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from models.inference import VLMInference
 
+_model: Optional[VLMInference] = None
+CHECKPOINT_DIR = Path("models/checkpoints/final")
+EVAL_RESULTS = Path("eval/results/results.json")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _model
+    ckpt = str(CHECKPOINT_DIR) if CHECKPOINT_DIR.exists() else None
+    _model = VLMInference(checkpoint=ckpt)
+    yield
+    _model = None
+
+
 app = FastAPI(
+    lifespan=lifespan,
     title="Multimodal VLM API",
     description="Vision-language model fine-tuned on custom image-text pairs",
     version="1.0.0",
@@ -28,33 +44,27 @@ app = FastAPI(
 app.add_middleware(CORSMiddleware, allow_origins=["*"],
                    allow_methods=["*"], allow_headers=["*"])
 
-_model: Optional[VLMInference] = None
-CHECKPOINT_DIR = Path("models/checkpoints/final")
-EVAL_RESULTS   = Path("eval/results/results.json")
-
 
 def get_model() -> VLMInference:
-    global _model
     if _model is None:
-        ckpt = str(CHECKPOINT_DIR) if CHECKPOINT_DIR.exists() else None
-        _model = VLMInference(checkpoint=ckpt)
+        raise HTTPException(status_code=503, detail="Model not initialized")
     return _model
 
 
 class PredictRequest(BaseModel):
-    model_config = ConfigDict(protected_namespaces=())   # suppress pydantic warning
+    model_config = ConfigDict(protected_namespaces=())
 
-    image_b64:      str = Field(..., description="Base64-encoded image")
-    prompt:         str = Field(default="Describe this image.")
+    image_b64: str = Field(..., description="Base64-encoded image")
+    prompt: str = Field(default="Describe this image.")
     max_new_tokens: int = Field(default=64, ge=1, le=256)
 
 
 class PredictResponse(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
 
-    prediction:  str
-    latency_s:   float
-    model_used:  str
+    prediction: str
+    latency_s: float
+    model_used: str
     prompt_used: str
 
 
@@ -63,7 +73,7 @@ class BatchPredictRequest(BaseModel):
 
 
 class BatchPredictResponse(BaseModel):
-    results:         list[PredictResponse]
+    results: list[PredictResponse]
     total_latency_s: float
 
 
@@ -88,22 +98,22 @@ def predict(req: PredictRequest):
     model = get_model()
     image = b64_to_pil(req.image_b64)
     model.max_new_tokens = req.max_new_tokens
-    t0   = time.time()
+    t0 = time.time()
     pred = model.generate(image, req.prompt)
     return PredictResponse(prediction=pred, latency_s=round(time.time()-t0, 3),
                            model_used=model.checkpoint, prompt_used=req.prompt)
 
 
 @app.post("/predict/file")
-async def predict_file(file: UploadFile = File(...),
-                       prompt: str = "Describe this image.",
-                       max_new_tokens: int = 64):
+def predict_file(file: UploadFile = File(...),
+                 prompt: str = "Describe this image.",
+                 max_new_tokens: int = 64):
     if not file.content_type.startswith("image/"):
         raise HTTPException(400, "Must upload an image file")
     model = get_model()
-    image = Image.open(io.BytesIO(await file.read())).convert("RGB")
+    image = Image.open(io.BytesIO(file.file.read())).convert("RGB")
     model.max_new_tokens = max_new_tokens
-    t0   = time.time()
+    t0 = time.time()
     pred = model.generate(image, prompt)
     return {"filename": file.filename, "prediction": pred,
             "latency_s": round(time.time()-t0, 3), "model_used": model.checkpoint}
@@ -113,17 +123,17 @@ async def predict_file(file: UploadFile = File(...),
 def predict_batch(req: BatchPredictRequest):
     if len(req.items) > 16:
         raise HTTPException(400, "Max 16 items per batch")
-    model  = get_model()
-    t_all  = time.time()
+    model = get_model()
+    t_all = time.time()
     results = []
     for item in req.items:
         image = b64_to_pil(item.image_b64)
         model.max_new_tokens = item.max_new_tokens
-        t0   = time.time()
+        t0 = time.time()
         pred = model.generate(image, item.prompt)
-        results.append(PredictResponse(prediction=pred, latency_s=round(time.time()-t0,3),
+        results.append(PredictResponse(prediction=pred, latency_s=round(time.time()-t0, 3),
                                        model_used=model.checkpoint, prompt_used=item.prompt))
-    return BatchPredictResponse(results=results, total_latency_s=round(time.time()-t_all,3))
+    return BatchPredictResponse(results=results, total_latency_s=round(time.time()-t_all, 3))
 
 
 @app.get("/eval")
